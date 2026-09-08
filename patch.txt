@@ -1,0 +1,6 @@
+    fun pronounceWord(word: String) {
+        val cleanWord = word.replace(Regex("[^a-zA-Z\\u4e00-\\u9fa5]"), "").trim()
+        if (cleanWord.isEmpty()) return
+        val locale = java.util.Locale.UK // Or use default TTS locale
+        ttsManager.speakWordWithAccent(cleanWord, locale)
+    }

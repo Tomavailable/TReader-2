@@ -1,0 +1,5 @@
+enum class SplitMode(val title: String) {
+    SCHEME_A("方案 A"),
+    SCHEME_C("方案 C"),
+    SIMPLE("简单方案")
+}
