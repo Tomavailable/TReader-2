@@ -223,7 +223,7 @@ fun TtsReaderScreen(
         bottomBar = {
             VibrantFooterPlayerBar(
                 uiState = uiState,
-                onToggleSplitComma = { viewModel.toggleSplitComma() },
+                onSetSplitMode = { viewModel.setSplitMode(it) },
                 onPlayPrevious = { viewModel.playPrevious() },
                 onTogglePlayPause = { viewModel.togglePlayPause() },
                 onPlayNext = { viewModel.playNext() },
@@ -245,6 +245,10 @@ fun TtsReaderScreen(
                 .background(bgColor)
         ) {
             val halfViewport = maxHeight / 2
+            
+            if (uiState.isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
 
             if (uiState.sentences.isEmpty()) {
                 VibrantEmptyState(
@@ -267,7 +271,7 @@ fun TtsReaderScreen(
                             bottom = halfViewport + 50.dp
                         ),
                         verticalArrangement = Arrangement.spacedBy(
-                            if (uiState.splitMode == SplitMode.PARAGRAPH_FLOW) uiState.flowParagraphSpacing.dp else 18.dp
+                            if (uiState.splitMode == SplitMode.PARAGRAPH_FLOW) uiState.flowParagraphSpacing.dp else 0.dp
                         )
                     ) {
                         if (uiState.splitMode == SplitMode.PARAGRAPH_FLOW) {
@@ -1080,7 +1084,7 @@ private fun FlowParagraphItem(
 @Composable
 private fun VibrantFooterPlayerBar(
     uiState: ReaderUiState,
-    onToggleSplitComma: () -> Unit,
+    onSetSplitMode: (SplitMode) -> Unit,
     onPlayPrevious: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onPlayNext: () -> Unit,
@@ -1104,6 +1108,7 @@ private fun VibrantFooterPlayerBar(
     var isRepeatMenuOpen by remember { mutableStateOf(false) }
     var isSpeedMenuOpen by remember { mutableStateOf(false) }
     var isSpeakerMenuOpen by remember { mutableStateOf(false) }
+    var isSplitMenuOpen by remember { mutableStateOf(false) }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -1393,38 +1398,81 @@ private fun VibrantFooterPlayerBar(
                     }
                 }
 
-                // Button 2: 轮流发音按钮
+                // Button 2: 拆分菜单
+                Box(modifier = Modifier.weight(1f)) {
+                    PlayerQuickButton(
+                        isActive = false,
+                        onClick = { isSplitMenuOpen = true },
+                        testTag = "player_split_menu_btn"
+                    ) {
+                        Text(
+                            text = uiState.splitMode.title,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = isSplitMenuOpen,
+                        onDismissRequest = { isSplitMenuOpen = false }
+                    ) {
+                        SplitMode.entries.forEach { mode ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(mode.title, fontWeight = if (uiState.splitMode == mode) FontWeight.Bold else FontWeight.Normal)
+                                        Text(mode.shortDesc, style = MaterialTheme.typography.labelSmall)
+                                    }
+                                },
+                                onClick = {
+                                    onSetSplitMode(mode)
+                                    isSplitMenuOpen = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Button 3: 轮流发音按钮
                 PlayerQuickButton(
-                    isActive = uiState.multiSpeakerEnabled,
+                    isActive = false,
                     onClick = onToggleMultiSpeaker,
                     testTag = "player_multi_speaker_btn",
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(
-                        Icons.Default.SyncAlt,
-                        contentDescription = null,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(modifier = Modifier.width(2.dp))
                     Text(
-                        text = "轮流",
+                        text = if (uiState.multiSpeakerEnabled) "轮流(开)" else "轮流",
                         fontSize = 11.5.sp,
-                        fontWeight = if (uiState.multiSpeakerEnabled) FontWeight.Bold else FontWeight.Medium
+                        fontWeight = FontWeight.Medium
                     )
                 }
 
-                // Button 3: 拆分按钮
-                PlayerQuickButton(
-                    isActive = uiState.isSplitEnabled,
-                    onClick = onToggleSplitComma,
-                    testTag = "player_split_btn",
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "拆分",
-                        fontSize = 11.5.sp,
-                        fontWeight = if (uiState.isSplitEnabled) FontWeight.Bold else FontWeight.Medium
-                    )
+                // Button 4: 发音人选择菜单
+                Box(modifier = Modifier.weight(1f)) {
+                    PlayerQuickButton(
+                        isActive = false,
+                        onClick = { isSpeakerMenuOpen = true },
+                        testTag = "player_speaker_menu_btn"
+                    ) {
+                        Text(
+                            text = "声音${uiState.activeSpeakerIndex + 1}",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = isSpeakerMenuOpen,
+                        onDismissRequest = { isSpeakerMenuOpen = false }
+                    ) {
+                        (0..2).forEach { index ->
+                            DropdownMenuItem(
+                                text = { Text("声音${index + 1}") },
+                                onClick = {
+                                    onSelectSpeaker(index)
+                                    isSpeakerMenuOpen = false
+                                }
+                            )
+                        }
+                    }
                 }
 
                 // Button 4: 设置按钮
@@ -1444,148 +1492,6 @@ private fun VibrantFooterPlayerBar(
                         text = "设置",
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 4. At the very bottom: Speaker Selector Bar (在播放按钮最下面添加一个发音人选项，点击展开设置好的常用发音人)
-            val currentSpeakerTitle = if (uiState.multiSpeakerEnabled) {
-                "3 位发音人轮流朗读模式 (⇄)"
-            } else {
-                val index = uiState.activeSpeakerIndex + 1
-                val voiceId = when (uiState.activeSpeakerIndex) {
-                    1 -> uiState.speaker2VoiceId
-                    2 -> uiState.speaker3VoiceId
-                    else -> uiState.speaker1VoiceId
-                }
-                val simpleName = voiceId?.substringAfterLast('-')?.substringAfterLast('#') ?: "默认音色"
-                "常用发音人 $index ($simpleName)"
-            }
-
-            Box(modifier = Modifier.fillMaxWidth()) {
-                Surface(
-                    onClick = { isSpeakerMenuOpen = true },
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(38.dp)
-                        .testTag("player_speaker_selector_bar")
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.RecordVoiceOver,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = currentSpeakerTitle,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-
-                        Icon(
-                            Icons.Default.ArrowDropDown,
-                            contentDescription = "展开选择发音人",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-
-                DropdownMenu(
-                    expanded = isSpeakerMenuOpen,
-                    onDismissRequest = { isSpeakerMenuOpen = false },
-                    modifier = Modifier.fillMaxWidth(0.85f)
-                ) {
-                    // Speaker 1
-                    val s1Name = uiState.speaker1VoiceId?.substringAfterLast('-') ?: "默认声音"
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text("常用发音人 1 (主音)", fontWeight = FontWeight.Bold)
-                                Text(s1Name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        },
-                        leadingIcon = {
-                            if (!uiState.multiSpeakerEnabled && uiState.activeSpeakerIndex == 0) {
-                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            }
-                        },
-                        onClick = {
-                            onSelectSpeaker(0)
-                            isSpeakerMenuOpen = false
-                        }
-                    )
-
-                    // Speaker 2
-                    val s2Name = uiState.speaker2VoiceId?.substringAfterLast('-') ?: "常用音色 2"
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text("常用发音人 2", fontWeight = FontWeight.Bold)
-                                Text(s2Name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        },
-                        leadingIcon = {
-                            if (!uiState.multiSpeakerEnabled && uiState.activeSpeakerIndex == 1) {
-                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            }
-                        },
-                        onClick = {
-                            onSelectSpeaker(1)
-                            isSpeakerMenuOpen = false
-                        }
-                    )
-
-                    // Speaker 3
-                    val s3Name = uiState.speaker3VoiceId?.substringAfterLast('-') ?: "常用音色 3"
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text("常用发音人 3", fontWeight = FontWeight.Bold)
-                                Text(s3Name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        },
-                        leadingIcon = {
-                            if (!uiState.multiSpeakerEnabled && uiState.activeSpeakerIndex == 2) {
-                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            }
-                        },
-                        onClick = {
-                            onSelectSpeaker(2)
-                            isSpeakerMenuOpen = false
-                        }
-                    )
-
-                    // Open Settings to change voices
-                    DropdownMenuItem(
-                        text = {
-                            Text("前往设置更换发音人音色...", fontSize = 13.sp)
-                        },
-                        leadingIcon = {
-                            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                        },
-                        onClick = {
-                            isSpeakerMenuOpen = false
-                            onOpenSettings()
-                        }
                     )
                 }
             }

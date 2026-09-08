@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -133,7 +134,8 @@ data class ReaderUiState(
     val isSettingsOpen: Boolean = false,
     val isExportDialogOpen: Boolean = false,
     val isRecentBooksDialogOpen: Boolean = false,
-    val exportState: ExportState = ExportState()
+    val exportState: ExportState = ExportState(),
+    val isLoading: Boolean = false
 )
 
 class TtsReaderViewModel(application: Application) : AndroidViewModel(application) {
@@ -310,48 +312,55 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun loadText(text: String, fileName: String = "已导入文本.txt", initialIndex: Int = 0) {
         stopPlayback()
-        val sentences = TextSegmenter.splitIntoSentences(
-            text,
-            _uiState.value.splitMode,
-            _uiState.value.isSplitEnabled,
-            _uiState.value.secondaryPuncts,
-            _uiState.value.terminatorPuncts,
-            _uiState.value.closingPuncts,
-            _uiState.value.simplePuncts,
-            _uiState.value.abbreviations,
-            _uiState.value.secondarySplitMinLength
-        )
-        val flowParagraphs = TextSegmenter.buildParagraphFlow(
-            text,
-            _uiState.value.terminatorPuncts,
-            _uiState.value.closingPuncts,
-            _uiState.value.abbreviations,
-            _uiState.value.isSplitEnabled,
-            _uiState.value.secondaryPuncts,
-            _uiState.value.secondarySplitMinLength
-        )
-        val validIndex = if (sentences.isNotEmpty()) initialIndex.coerceIn(0, sentences.size - 1) else -1
-
-        // Persist to recent books and settings
-        recentBooksStore.saveRecentBook(fileName, text, sentences.size, validIndex)
-        val updatedRecent = recentBooksStore.getRecentBooks()
-
-        appSettingsStore.lastOpenedFileName = fileName
-        appSettingsStore.lastOpenedFullText = text
-        appSettingsStore.lastOpenedIndex = validIndex
-
-        _uiState.update {
-            it.copy(
-                rawText = text,
-                fileName = fileName,
-                sentences = sentences,
-                flowParagraphs = flowParagraphs,
-                currentIndex = validIndex,
-                currentRepeatPass = 1,
-                currentSpeakerPass = 0,
-                isPlaying = false,
-                recentBooks = updatedRecent
+        _uiState.update { it.copy(isLoading = true) }
+        
+        viewModelScope.launch(Dispatchers.Default) {
+            val sentences = TextSegmenter.splitIntoSentences(
+                text,
+                _uiState.value.splitMode,
+                _uiState.value.isSplitEnabled,
+                _uiState.value.secondaryPuncts,
+                _uiState.value.terminatorPuncts,
+                _uiState.value.closingPuncts,
+                _uiState.value.simplePuncts,
+                _uiState.value.abbreviations,
+                _uiState.value.secondarySplitMinLength
             )
+            val flowParagraphs = TextSegmenter.buildParagraphFlow(
+                text,
+                _uiState.value.terminatorPuncts,
+                _uiState.value.closingPuncts,
+                _uiState.value.abbreviations,
+                _uiState.value.isSplitEnabled,
+                _uiState.value.secondaryPuncts,
+                _uiState.value.secondarySplitMinLength
+            )
+            val validIndex = if (sentences.isNotEmpty()) initialIndex.coerceIn(0, sentences.size - 1) else -1
+    
+            // Persist to recent books and settings
+            recentBooksStore.saveRecentBook(fileName, text, sentences.size, validIndex)
+            val updatedRecent = recentBooksStore.getRecentBooks()
+    
+            appSettingsStore.lastOpenedFileName = fileName
+            appSettingsStore.lastOpenedFullText = text
+            appSettingsStore.lastOpenedIndex = validIndex
+    
+            withContext(Dispatchers.Main) {
+                _uiState.update {
+                    it.copy(
+                        rawText = text,
+                        fileName = fileName,
+                        sentences = sentences,
+                        flowParagraphs = flowParagraphs,
+                        currentIndex = validIndex,
+                        currentRepeatPass = 1,
+                        currentSpeakerPass = 0,
+                        isPlaying = false,
+                        recentBooks = updatedRecent,
+                        isLoading = false
+                    )
+                }
+            }
         }
     }
 
@@ -426,16 +435,6 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
         if (wasPlaying && sentences.isNotEmpty()) {
             jumpToSentence(0)
         }
-    }
-
-    fun toggleSplitMode() {
-        val modes = SplitMode.values()
-        val nextIdx = (modes.indexOf(_uiState.value.splitMode) + 1) % modes.size
-        setSplitMode(modes[nextIdx])
-    }
-
-    fun toggleSplitComma() {
-        toggleSplitEnabled()
     }
 
     fun setSplitMode(mode: SplitMode) {

@@ -17,11 +17,11 @@ data class FlowParagraph(
 )
 
 enum class SplitMode(val title: String, val shortDesc: String) {
-    SMART("极速状态机断句", "双指针状态机·缩写与浮点数精准避让"),
-    PARAGRAPH_FLOW("原文排版流式朗读", "保持文章原始段落排版·流式高亮朗读与即点即读"),
-    PUNCTUATION("标准标点极简断句", "纯终止标点与闭合引号切分·极速无正则"),
-    SCHEME_A("主流正则断句", "主流正则回溯与中英文行切分"),
-    SIMPLE("简易标点断句", "纯规则单标点快速切割")
+    PARAGRAPH_FLOW("阅读", "保持文章原始段落排版·流式高亮朗读与即点即读"),
+    SMART("整句1", "双指针状态机·缩写与浮点数精准避让"),
+    SCHEME_A("整句2", "主流正则回溯与中英文行切分"),
+    PUNCTUATION("自定义", "纯终止标点与闭合引号切分·极速无正则"),
+    SUPER_SHORT("超短句", "默认依据逗号/分号进行二次智能拆分")
 }
 
 object TextSegmenter {
@@ -55,7 +55,7 @@ object TextSegmenter {
         if (rawText.isBlank()) return emptyList()
 
         val baseSentences = when (splitMode) {
-            SplitMode.SMART -> splitSmart(rawText, terminatorPuncts, closingPuncts, abbreviations)
+            SplitMode.SMART, SplitMode.SUPER_SHORT -> splitSmart(rawText, terminatorPuncts, closingPuncts, abbreviations)
             SplitMode.PARAGRAPH_FLOW -> {
                 val paragraphs = buildParagraphFlow(
                     rawText,
@@ -70,10 +70,9 @@ object TextSegmenter {
             }
             SplitMode.PUNCTUATION -> splitPunctuation(rawText, terminatorPuncts, closingPuncts)
             SplitMode.SCHEME_A -> splitWithRegexLookaround(rawText, terminatorPuncts, closingPuncts, abbreviations)
-            SplitMode.SIMPLE -> splitWithSimpleParser(rawText, simplePuncts, closingPuncts)
         }
 
-        return if (isSplitEnabled) {
+        return if (isSplitEnabled || splitMode == SplitMode.SUPER_SHORT) {
             applySecondarySplitIfNeeded(baseSentences, secondaryPuncts, secondarySplitMinLength)
         } else {
             baseSentences
@@ -174,7 +173,7 @@ object TextSegmenter {
     private fun splitSingleSentenceByLength(
         sentence: String,
         subPuncts: Set<Char> = DEFAULT_SECONDARY_PUNCTS,
-        minLength: Int = 30
+        minLength: Int = 40 // Changed from 30
     ): List<String> {
         val len = sentence.length
         if (len <= minLength) return listOf(sentence)
@@ -190,7 +189,8 @@ object TextSegmenter {
             return listOf(sentence)
         }
 
-        if (len <= 80) {
+        // Changed thresholds from 80/150 to 90
+        if (len <= 90) {
             val mid = len / 2
             val bestIdx = punctIndices.minByOrNull { kotlin.math.abs(it - mid) } ?: return listOf(sentence)
             val part1 = cleanAndFormatSentence(sentence.substring(0, bestIdx + 1))
@@ -201,18 +201,7 @@ object TextSegmenter {
             return if (res.isEmpty()) listOf(sentence) else res
         }
 
-        if (len <= 150) {
-            val mid = len / 2
-            val bestIdx = punctIndices.minByOrNull { kotlin.math.abs(it - mid) } ?: return listOf(sentence)
-            val part1 = cleanAndFormatSentence(sentence.substring(0, bestIdx + 1))
-            val part2 = cleanAndFormatSentence(sentence.substring(bestIdx + 1))
-            val res = mutableListOf<String>()
-            if (part1.isNotEmpty()) res.add(part1)
-            if (part2.isNotEmpty()) res.add(part2)
-            return if (res.isEmpty()) listOf(sentence) else res
-        }
-
-        // 150 字符以上：在整句的 1/3 和 2/3 位置附近寻找最合适的标点，最多平滑拆分为 3 段
+        // > 90 字符：根据标点拆分为 2 个或最多拆分为 3 个句子。
         val target1 = len / 3
         val target2 = (len * 2) / 3
 

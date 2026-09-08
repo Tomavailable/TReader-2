@@ -824,7 +824,7 @@ fun SettingsBottomSheet(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        SplitMode.values().forEach { mode ->
+                        SplitMode.entries.forEach { mode ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1024,12 +1024,8 @@ fun SettingsBottomSheet(
                         onDismiss = { editingSplitMode = null }
                     )
                 }
-                SplitMode.SIMPLE -> {
-                    SimpleSchemeEditDialog(
-                        uiState = uiState,
-                        viewModel = viewModel,
-                        onDismiss = { editingSplitMode = null }
-                    )
+                SplitMode.SUPER_SHORT -> {
+                    // TODO: Add edit dialog for SUPER_SHORT if needed, or leave blank for now
                 }
                 null -> {}
             }
