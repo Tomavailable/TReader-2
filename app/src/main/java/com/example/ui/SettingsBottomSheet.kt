@@ -38,6 +38,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -105,6 +106,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.SplitMode
+import com.example.data.SecondarySplitScheme
 import com.example.data.TtsVoiceItem
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -327,6 +329,48 @@ fun SettingsBottomSheet(
                             modifier = Modifier.testTag("loop_chip_$count")
                         )
                     }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // 离线TTS预缓冲加速模式
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Speed,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "离线模型预缓冲模式 (预合成3句)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "开启后后台自动预合成后续3句音频，消除VoxSherpa/端侧神经TTS模型断句停顿，实现无缝连贯朗读",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 16.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = uiState.ttsPreloadBufferEnabled,
+                        onCheckedChange = { viewModel.setTtsPreloadBufferEnabled(it) },
+                        modifier = Modifier.testTag("tts_preload_buffer_switch")
+                    )
                 }
             }
 
@@ -1565,6 +1609,7 @@ private fun CustomPunctRuleSection(
     title: String,
     desc: String,
     puncts: Set<Char>,
+    allowNewlineQuickAdd: Boolean = true,
     onAdd: (Char) -> Unit,
     onRemove: (Char) -> Unit
 ) {
@@ -1597,25 +1642,42 @@ private fun CustomPunctRuleSection(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             puncts.forEach { ch ->
+                val isNewline = ch == '\n'
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                    color = if (isNewline) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, if (isNewline) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        modifier = Modifier.padding(horizontal = if (isNewline) 8.dp else 7.dp, vertical = 3.dp)
                     ) {
-                        Text(
-                            text = ch.toString(),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        if (isNewline) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardReturn,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "换行符 ↵",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Text(
+                                text = ch.toString(),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                         Spacer(modifier = Modifier.width(4.dp))
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "删除 $ch",
+                            contentDescription = if (isNewline) "删除换行符断句" else "删除 $ch",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
                                 .size(14.dp)
@@ -1636,17 +1698,34 @@ private fun CustomPunctRuleSection(
             OutlinedTextField(
                 value = inputText,
                 onValueChange = { inputText = it },
-                placeholder = { Text("输入要添加的符号", fontSize = 11.sp) },
+                placeholder = { Text("输入标点(支持 \\n 换行符)", fontSize = 11.sp) },
                 singleLine = true,
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier
                     .weight(1f)
                     .height(44.dp)
             )
+            if (allowNewlineQuickAdd && !puncts.contains('\n')) {
+                OutlinedButton(
+                    onClick = { onAdd('\n') },
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.height(44.dp)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardReturn, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Text("+ 换行符", fontSize = 11.sp)
+                }
+            }
             Button(
                 onClick = {
-                    inputText.trim().forEach { ch ->
-                        onAdd(ch)
+                    val clean = inputText.trim()
+                    if (clean == "\\n" || clean == "换行" || clean == "回车" || clean == "\n") {
+                        onAdd('\n')
+                    } else {
+                        clean.forEach { ch ->
+                            onAdd(ch)
+                        }
                     }
                     inputText = ""
                 },
@@ -2355,11 +2434,71 @@ private fun SecondarySplitEditDialog(
                 }
 
                 Text(
-                    text = "长句超过字数阈值时，自动在句子中间靠近中顿标点处拆分为均衡的两段或三段短句。",
+                    text = "长句超过字数阈值时，自动寻找句子中的语义标点进行二次拆分，提升朗读节奏与行文可读性。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 16.sp
                 )
+
+                // 拆分方案选择
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        text = "二次拆分方案",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    SecondarySplitScheme.values().forEach { scheme ->
+                        val isSelected = uiState.secondarySplitScheme == scheme
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable { viewModel.setSecondarySplitScheme(scheme) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surface
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = { viewModel.setSecondarySplitScheme(scheme) }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = scheme.title,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = scheme.desc,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        lineHeight = 15.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
                 Column(
                     modifier = Modifier

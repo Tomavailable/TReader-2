@@ -128,12 +128,35 @@ class AppSettingsStore(context: Context) {
         get() = prefs.getInt("secondary_split_min_length", 30)
         set(value) = prefs.edit().putInt("secondary_split_min_length", value).apply()
 
+    var secondarySplitScheme: SecondarySplitScheme
+        get() {
+            val name = prefs.getString("secondary_split_scheme", SecondarySplitScheme.SCHEME_2.name)
+            return try {
+                SecondarySplitScheme.valueOf(name ?: SecondarySplitScheme.SCHEME_2.name)
+            } catch (e: Exception) {
+                SecondarySplitScheme.SCHEME_2
+            }
+        }
+        set(value) = prefs.edit().putString("secondary_split_scheme", value.name).apply()
+
+    var ttsPreloadBufferEnabled: Boolean
+        get() = prefs.getBoolean("tts_preload_buffer_enabled", false)
+        set(value) = prefs.edit().putBoolean("tts_preload_buffer_enabled", value).apply()
+
+    var splitOnNewline: Boolean
+        get() = prefs.getBoolean("split_on_newline", true)
+        set(value) = prefs.edit().putBoolean("split_on_newline", value).apply()
+
     var terminatorPuncts: Set<Char>
         get() {
-            val str = prefs.getString("terminator_puncts", null) ?: return TextSegmenter.DEFAULT_TERMINATOR_PUNCTS
-            return str.toSet()
+            val str = prefs.getString("terminator_puncts", null)
+            val base = if (str != null) str.toSet() else TextSegmenter.DEFAULT_TERMINATOR_PUNCTS
+            return if (splitOnNewline) base + '\n' else base - '\n'
         }
-        set(value) = prefs.edit().putString("terminator_puncts", value.joinToString("")).apply()
+        set(value) {
+            splitOnNewline = value.contains('\n')
+            prefs.edit().putString("terminator_puncts", value.joinToString("")).apply()
+        }
 
     var closingPuncts: Set<Char>
         get() {

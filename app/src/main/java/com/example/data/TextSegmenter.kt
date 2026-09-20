@@ -24,12 +24,17 @@ enum class SplitMode(val title: String, val shortDesc: String) {
     SUPER_SHORT("超短句", "默认依据逗号/分号进行二次智能拆分")
 }
 
+enum class SecondarySplitScheme(val title: String, val desc: String) {
+    SCHEME_1("二次拆分方案1 (中点对半/三等分)", "在长句中心点附近寻找中顿标点，拆为2~3段均衡子句"),
+    SCHEME_2("二次拆分方案2 (标点权重与动态步长)", "标点优先级加权(分号/冒号>逗号>顿号)+动态自适应步长+引号括号保护")
+}
+
 object TextSegmenter {
 
     val DEFAULT_SECONDARY_PUNCTS = setOf('，', ',', '；', ';', '：', ':', '、', '—', '–')
-    val DEFAULT_TERMINATOR_PUNCTS = setOf('。', '？', '！', '…', '.', '?', '!')
+    val DEFAULT_TERMINATOR_PUNCTS = setOf('。', '？', '！', '…', '.', '?', '!', '\n')
     val DEFAULT_CLOSING_PUNCTS = setOf('”', '’', '"', '\'', '」', '』', '）', ')', '》', '>', '】', ']', '｝', '}')
-    val DEFAULT_SIMPLE_PUNCTS = setOf('。', '？', '！', '…', '.', '?', '!')
+    val DEFAULT_SIMPLE_PUNCTS = setOf('。', '？', '！', '…', '.', '?', '!', '\n')
     val DEFAULT_ABBREVIATIONS = setOf(
         "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.",
         "e.g.", "i.e.", "no.", "vol.", "jan.", "feb.", "mar.", "apr.",
@@ -39,7 +44,7 @@ object TextSegmenter {
 
     /**
      * Splits raw text into sentences based on the chosen [splitMode], optional [isSplitEnabled],
-     * and user-customizable punctuation rules.
+     * [secondarySplitScheme], and user-customizable punctuation rules.
      */
     fun splitIntoSentences(
         rawText: String,
@@ -50,7 +55,8 @@ object TextSegmenter {
         closingPuncts: Set<Char> = DEFAULT_CLOSING_PUNCTS,
         simplePuncts: Set<Char> = DEFAULT_SIMPLE_PUNCTS,
         abbreviations: Set<String> = DEFAULT_ABBREVIATIONS,
-        secondarySplitMinLength: Int = 30
+        secondarySplitMinLength: Int = 30,
+        secondarySplitScheme: SecondarySplitScheme = SecondarySplitScheme.SCHEME_2
     ): List<String> {
         if (rawText.isBlank()) return emptyList()
 
@@ -64,7 +70,8 @@ object TextSegmenter {
                     abbreviations,
                     isSplitEnabled,
                     secondaryPuncts,
-                    secondarySplitMinLength
+                    secondarySplitMinLength,
+                    secondarySplitScheme
                 )
                 return paragraphs.flatMap { p -> p.spans.map { it.sentenceText } }
             }
@@ -73,10 +80,65 @@ object TextSegmenter {
         }
 
         return if (isSplitEnabled || splitMode == SplitMode.SUPER_SHORT) {
-            applySecondarySplitIfNeeded(baseSentences, secondaryPuncts, secondarySplitMinLength)
+            applySecondarySplitIfNeeded(baseSentences, secondaryPuncts, secondarySplitMinLength, secondarySplitScheme)
         } else {
             baseSentences
         }
+    }
+
+    private val PARAGRAPH_SPLIT_REGEX = Regex("""\r?\n+""")
+
+    /**
+     * Unified single-pass document segmentation that builds sentences, flow paragraphs,
+     * and chapters in one unified operation without redundant passes.
+     */
+    fun segmentDocument(
+        rawText: String,
+        splitMode: SplitMode = SplitMode.SMART,
+        isSplitEnabled: Boolean = false,
+        secondaryPuncts: Set<Char> = DEFAULT_SECONDARY_PUNCTS,
+        terminatorPuncts: Set<Char> = DEFAULT_TERMINATOR_PUNCTS,
+        closingPuncts: Set<Char> = DEFAULT_CLOSING_PUNCTS,
+        simplePuncts: Set<Char> = DEFAULT_SIMPLE_PUNCTS,
+        abbreviations: Set<String> = DEFAULT_ABBREVIATIONS,
+        secondarySplitMinLength: Int = 30,
+        secondarySplitScheme: SecondarySplitScheme = SecondarySplitScheme.SCHEME_2
+    ): CachedBookStructure {
+        if (rawText.isBlank()) {
+            return CachedBookStructure(emptyList(), emptyList(), emptyList())
+        }
+
+        val (sentences, flowParagraphs) = if (splitMode == SplitMode.PARAGRAPH_FLOW) {
+            val paragraphs = buildParagraphFlow(
+                rawText,
+                terminatorPuncts,
+                closingPuncts,
+                abbreviations,
+                isSplitEnabled,
+                secondaryPuncts,
+                secondarySplitMinLength,
+                secondarySplitScheme
+            )
+            val sList = paragraphs.flatMap { p -> p.spans.map { it.sentenceText } }
+            Pair(sList, paragraphs)
+        } else {
+            val sList = splitIntoSentences(
+                rawText,
+                splitMode,
+                isSplitEnabled,
+                secondaryPuncts,
+                terminatorPuncts,
+                closingPuncts,
+                simplePuncts,
+                abbreviations,
+                secondarySplitMinLength,
+                secondarySplitScheme
+            )
+            Pair(sList, emptyList())
+        }
+
+        val chapters = ChapterDetector.detectChapters(sentences)
+        return CachedBookStructure(sentences, flowParagraphs, chapters)
     }
 
     /**
@@ -89,11 +151,19 @@ object TextSegmenter {
         abbreviations: Set<String> = DEFAULT_ABBREVIATIONS,
         isSplitEnabled: Boolean = false,
         secondaryPuncts: Set<Char> = DEFAULT_SECONDARY_PUNCTS,
-        secondarySplitMinLength: Int = 30
+        secondarySplitMinLength: Int = 30,
+        secondarySplitScheme: SecondarySplitScheme = SecondarySplitScheme.SCHEME_2
     ): List<FlowParagraph> {
         if (rawText.isBlank()) return emptyList()
 
-        val rawParagraphs = rawText.split(Regex("\r?\n+"))
+        val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
+        val effectiveTerminators = if (terminatorPuncts.isNotEmpty()) terminatorPuncts else DEFAULT_TERMINATOR_PUNCTS
+        val splitOnNewline = effectiveTerminators.contains('\n')
+        val rawParagraphs = if (splitOnNewline) {
+            normalized.split(PARAGRAPH_SPLIT_REGEX)
+        } else {
+            normalized.split(Regex("\n{2,}")).map { stitchSingleNewlines(it) }
+        }
         val result = mutableListOf<FlowParagraph>()
         var globalIndex = 0
 
@@ -102,7 +172,7 @@ object TextSegmenter {
             if (trimmed.isNotEmpty()) {
                 val baseSentences = splitSmart(trimmed, terminatorPuncts, closingPuncts, abbreviations)
                 val finalSentences = if (isSplitEnabled) {
-                    applySecondarySplitIfNeeded(baseSentences, secondaryPuncts, secondarySplitMinLength)
+                    applySecondarySplitIfNeeded(baseSentences, secondaryPuncts, secondarySplitMinLength, secondarySplitScheme)
                 } else {
                     baseSentences
                 }
@@ -158,22 +228,30 @@ object TextSegmenter {
     private fun applySecondarySplitIfNeeded(
         sentences: List<String>,
         secondaryPuncts: Set<Char> = DEFAULT_SECONDARY_PUNCTS,
-        minLength: Int = 30
+        minLength: Int = 30,
+        scheme: SecondarySplitScheme = SecondarySplitScheme.SCHEME_2
     ): List<String> {
         if (sentences.isEmpty()) return sentences
 
         val result = mutableListOf<String>()
         for (sentence in sentences) {
-            val subSegments = splitSingleSentenceByLength(sentence, secondaryPuncts, minLength)
+            val subSegments = when (scheme) {
+                SecondarySplitScheme.SCHEME_1 -> splitSingleSentenceByLengthScheme1(sentence, secondaryPuncts, minLength)
+                SecondarySplitScheme.SCHEME_2 -> splitSingleSentenceByLengthScheme2(sentence, secondaryPuncts, minLength)
+            }
             result.addAll(subSegments)
         }
         return result
     }
 
-    private fun splitSingleSentenceByLength(
+    /**
+     * 二次拆分方案 1 (原始方案)：
+     * 超过 40 字拆分，中心点附近对半切；超过 90 字寻找 1/3 与 2/3 位置最多拆成 3 段。
+     */
+    private fun splitSingleSentenceByLengthScheme1(
         sentence: String,
         subPuncts: Set<Char> = DEFAULT_SECONDARY_PUNCTS,
-        minLength: Int = 40 // Changed from 30
+        minLength: Int = 40
     ): List<String> {
         val len = sentence.length
         if (len <= minLength) return listOf(sentence)
@@ -189,7 +267,6 @@ object TextSegmenter {
             return listOf(sentence)
         }
 
-        // Changed thresholds from 80/150 to 90
         if (len <= 90) {
             val mid = len / 2
             val bestIdx = punctIndices.minByOrNull { kotlin.math.abs(it - mid) } ?: return listOf(sentence)
@@ -253,6 +330,192 @@ object TextSegmenter {
     }
 
     /**
+     * 二次拆分方案 2 (优化升级版)：
+     * 1. 标点语义权重：分号/冒号(权重3) > 逗号/破折号(权重2) > 顿号(权重1)
+     * 2. 成对引号/括号穿透保护：优先避免在引号内、括号内的标点处将语法结构截断
+     * 3. 动态步长迭代切分：无 3 段硬限制，针对 100~300+ 字超长段落按动态步长均匀切分
+     * 4. 极速纯字符级清洗，减少无效对象分配
+     */
+    private fun splitSingleSentenceByLengthScheme2(
+        sentence: String,
+        subPuncts: Set<Char> = DEFAULT_SECONDARY_PUNCTS,
+        minLength: Int = 30
+    ): List<String> {
+        val len = sentence.length
+        if (len <= minLength) return listOf(sentence)
+
+        // 收集所有候选标点以及深度信息
+        val candidates = mutableListOf<PunctCandidate>()
+        var quoteOpen = false
+        var bracketDepth = 0
+
+        for (i in 0 until len) {
+            val ch = sentence[i]
+            when (ch) {
+                '“', '”', '"' -> quoteOpen = !quoteOpen
+                '（', '(', '【', '[', '{', '｛', '《', '<' -> bracketDepth++
+                '）', ')', '】', ']', '}', '｝', '》', '>' -> if (bracketDepth > 0) bracketDepth--
+            }
+
+            if (subPuncts.contains(ch)) {
+                val weight = when (ch) {
+                    '；', ';' -> 300
+                    '：', ':' -> 250
+                    '—', '–' -> 220
+                    '，', ',' -> 200
+                    '、' -> 100
+                    else -> 150
+                }
+                val isInsideEnclosure = quoteOpen || bracketDepth > 0
+                candidates.add(PunctCandidate(index = i, weight = weight, insideEnclosure = isInsideEnclosure))
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            return listOf(sentence)
+        }
+
+        // 目标每个子句理想长度（以 minLength 为基准，例如 30~45 字一段）
+        val targetStep = minLength.coerceAtLeast(25)
+        val neededParts = kotlin.math.max(2, (len + targetStep - 1) / targetStep)
+
+        val splitPoints = mutableListOf<Int>()
+        var lastSplit = 0
+
+        for (part in 1 until neededParts) {
+            val idealTarget = (len * part) / neededParts
+            if (idealTarget <= lastSplit + 10 || idealTarget >= len - 8) continue
+
+            // 在 idealTarget 附近寻找得分最高的标点候选
+            // 得分 = 标点权重 - 距离惩罚 - 闭合穿透惩罚
+            var bestCandidate: PunctCandidate? = null
+            var bestScore = Double.NEGATIVE_INFINITY
+
+            for (cand in candidates) {
+                if (cand.index <= lastSplit + 8) continue
+                if (cand.index >= len - 6) continue
+
+                val distance = kotlin.math.abs(cand.index - idealTarget)
+                val distancePenalty = distance * 12.0
+                val enclosurePenalty = if (cand.insideEnclosure) 180.0 else 0.0
+
+                val score = cand.weight.toDouble() - distancePenalty - enclosurePenalty
+                if (score > bestScore) {
+                    bestScore = score
+                    bestCandidate = cand
+                }
+            }
+
+            if (bestCandidate != null && bestCandidate.index > lastSplit) {
+                splitPoints.add(bestCandidate.index)
+                lastSplit = bestCandidate.index
+            }
+        }
+
+        if (splitPoints.isEmpty()) {
+            // 如果多点评分未选出，选全局最高权且适中的一个断点
+            val mid = len / 2
+            val fallback = candidates.maxByOrNull {
+                it.weight - kotlin.math.abs(it.index - mid) * 8 - (if (it.insideEnclosure) 150 else 0)
+            }
+            if (fallback != null) {
+                splitPoints.add(fallback.index)
+            } else {
+                return listOf(sentence)
+            }
+        }
+
+        splitPoints.sort()
+        val segments = mutableListOf<String>()
+        var start = 0
+        for (pt in splitPoints) {
+            if (pt + 1 > start) {
+                val seg = fastCleanSentence(sentence.substring(start, pt + 1))
+                if (seg.isNotEmpty()) segments.add(seg)
+                start = pt + 1
+            }
+        }
+        if (start < len) {
+            val seg = fastCleanSentence(sentence.substring(start))
+            if (seg.isNotEmpty()) segments.add(seg)
+        }
+
+        return if (segments.isEmpty()) listOf(sentence) else segments
+    }
+
+    private data class PunctCandidate(
+        val index: Int,
+        val weight: Int,
+        val insideEnclosure: Boolean
+    )
+
+    /**
+     * 高性能纯字符遍历清洗，消除正则高频回溯与内存开销
+     */
+    private fun fastCleanSentence(str: String): String {
+        val s = str.trim()
+        if (s.isEmpty()) return ""
+        val sb = StringBuilder(s.length)
+        var lastChar = ' '
+        for (i in s.indices) {
+            val ch = s[i]
+            if (ch == '\r' || ch == '\n') {
+                // 中文字符间的换行直接消除，英文字符间保留空格
+                val prevIsChinese = i > 0 && isChineseChar(s[i - 1])
+                val nextIsChinese = i + 1 < s.length && isChineseChar(s[i + 1])
+                if (!(prevIsChinese && nextIsChinese)) {
+                    if (lastChar != ' ') {
+                        sb.append(' ')
+                        lastChar = ' '
+                    }
+                }
+            } else if (ch == ' ' || ch == '\t') {
+                if (lastChar != ' ') {
+                    sb.append(' ')
+                    lastChar = ' '
+                }
+            } else {
+                sb.append(ch)
+                lastChar = ch
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    private fun isChineseChar(c: Char): Boolean {
+        return c.code in 0x4E00..0x9FA5
+    }
+
+    /**
+     * Stitches single soft line wraps within a paragraph into continuous prose.
+     * CJK characters are joined directly without spaces, and Western words are separated by single space.
+     */
+    fun stitchSingleNewlines(paragraph: String): String {
+        val unhyphenated = paragraph.replace(Regex("""([a-zA-Z]+)-\n([a-zA-Z]+)""")) { match ->
+            match.groupValues[1] + match.groupValues[2]
+        }
+        val lines = unhyphenated.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return ""
+        val sb = StringBuilder()
+        for (line in lines) {
+            if (sb.isEmpty()) {
+                sb.append(line)
+            } else {
+                val prevChar = sb.last()
+                val nextChar = line.first()
+                if (isChineseChar(prevChar) && isChineseChar(nextChar)) {
+                    sb.append(line)
+                } else if (isChineseChar(prevChar) || isChineseChar(nextChar)) {
+                    sb.append(line)
+                } else {
+                    sb.append(' ').append(line)
+                }
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
      * Removes internal newlines and formats spacing so the sentence renders continuously
      */
     private fun cleanAndFormatSentence(sentence: String): String {
@@ -276,8 +539,13 @@ object TextSegmenter {
         abbreviations: Set<String> = DEFAULT_ABBREVIATIONS
     ): List<String> {
         val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
-        val paragraphs = normalized.split(Regex("\n+")).filter { it.isNotBlank() }
         val effectiveTerminators = if (terminatorPuncts.isNotEmpty()) terminatorPuncts else DEFAULT_TERMINATOR_PUNCTS
+        val splitOnNewline = effectiveTerminators.contains('\n')
+        val paragraphs = if (splitOnNewline) {
+            normalized.split(Regex("\n+")).filter { it.isNotBlank() }
+        } else {
+            normalized.split(Regex("\n{2,}")).map { stitchSingleNewlines(it) }.filter { it.isNotBlank() }
+        }
 
         val normAbbr = mutableSetOf<String>()
         for (a in abbreviations) {
@@ -368,8 +636,13 @@ object TextSegmenter {
         closingPuncts: Set<Char> = DEFAULT_CLOSING_PUNCTS
     ): List<String> {
         val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
-        val paragraphs = normalized.split(Regex("\n+")).filter { it.isNotBlank() }
         val effectiveTerminators = if (terminatorPuncts.isNotEmpty()) terminatorPuncts else DEFAULT_TERMINATOR_PUNCTS
+        val splitOnNewline = effectiveTerminators.contains('\n')
+        val paragraphs = if (splitOnNewline) {
+            normalized.split(Regex("\n+")).filter { it.isNotBlank() }
+        } else {
+            normalized.split(Regex("\n{2,}")).map { stitchSingleNewlines(it) }.filter { it.isNotBlank() }
+        }
 
         val result = mutableListOf<String>()
 
@@ -421,10 +694,17 @@ object TextSegmenter {
      */
     fun splitIcu(
         rawText: String,
-        closingPuncts: Set<Char> = DEFAULT_CLOSING_PUNCTS
+        closingPuncts: Set<Char> = DEFAULT_CLOSING_PUNCTS,
+        terminatorPuncts: Set<Char> = DEFAULT_TERMINATOR_PUNCTS
     ): List<String> {
         val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
-        val paragraphs = normalized.split(Regex("\n+")).filter { it.isNotBlank() }
+        val effectiveTerminators = if (terminatorPuncts.isNotEmpty()) terminatorPuncts else DEFAULT_TERMINATOR_PUNCTS
+        val splitOnNewline = effectiveTerminators.contains('\n')
+        val paragraphs = if (splitOnNewline) {
+            normalized.split(Regex("\n+")).filter { it.isNotBlank() }
+        } else {
+            normalized.split(Regex("\n{2,}")).map { stitchSingleNewlines(it) }.filter { it.isNotBlank() }
+        }
         val result = mutableListOf<String>()
 
         val iterator = BreakIterator.getSentenceInstance(Locale.getDefault())
@@ -444,7 +724,7 @@ object TextSegmenter {
                 }
                 val segment = text.substring(start, actualEnd).trim()
                 val cleaned = cleanAndFormatSentence(segment)
-                if (cleaned.isNotEmpty() && !isOnlyPunctuationOrWhitespace(cleaned, DEFAULT_TERMINATOR_PUNCTS, closingPuncts)) {
+                if (cleaned.isNotEmpty() && !isOnlyPunctuationOrWhitespace(cleaned, effectiveTerminators, closingPuncts)) {
                     result.add(cleaned)
                 }
                 start = actualEnd
@@ -470,7 +750,14 @@ object TextSegmenter {
         abbreviations: Set<String> = DEFAULT_ABBREVIATIONS
     ): List<String> {
         return try {
-            val lines = rawText.split(Regex("[\r\n]+"))
+            val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
+            val effectiveTerminators = if (terminatorPuncts.isNotEmpty()) terminatorPuncts else DEFAULT_TERMINATOR_PUNCTS
+            val splitOnNewline = effectiveTerminators.contains('\n')
+            val lines = if (splitOnNewline) {
+                normalized.split(Regex("\n+"))
+            } else {
+                normalized.split(Regex("\n{2,}")).map { stitchSingleNewlines(it) }
+            }
             val result = mutableListOf<String>()
 
             for (line in lines) {
@@ -479,7 +766,7 @@ object TextSegmenter {
 
                 val sentencesInLine = segmentSingleLine(
                     line = trimmedLine,
-                    terminatorPuncts = if (terminatorPuncts.isNotEmpty()) terminatorPuncts else DEFAULT_TERMINATOR_PUNCTS,
+                    terminatorPuncts = effectiveTerminators,
                     closingPuncts = closingPuncts,
                     abbreviations = abbreviations
                 )
@@ -634,7 +921,14 @@ object TextSegmenter {
         simplePuncts: Set<Char> = DEFAULT_SIMPLE_PUNCTS,
         closingPuncts: Set<Char> = DEFAULT_CLOSING_PUNCTS
     ): List<String> {
-        val paragraphs = rawText.split(Regex("(\r?\n){2,}"))
+        val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
+        val effectiveSimple = if (simplePuncts.isNotEmpty()) simplePuncts else DEFAULT_SIMPLE_PUNCTS
+        val splitOnNewline = effectiveSimple.contains('\n')
+        val paragraphs = if (splitOnNewline) {
+            normalized.split(Regex("\n+"))
+        } else {
+            normalized.split(Regex("\n{2,}")).map { stitchSingleNewlines(it) }
+        }
         val result = mutableListOf<String>()
 
         for (p in paragraphs) {

@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Toc
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Book
@@ -158,17 +159,8 @@ fun TtsReaderScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                val parsed = DocumentParser.parseUri(context, uri)
-                if (parsed.text.isBlank()) {
-                    Toast.makeText(context, "未在文件中找到有效可朗读文本", Toast.LENGTH_SHORT).show()
-                } else {
-                    viewModel.loadText(parsed.text, parsed.title)
-                    Toast.makeText(context, "已导入 [${parsed.format}]: ${parsed.title} (${parsed.text.length} 字)", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                Toast.makeText(context, "读取文件失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-            }
+            viewModel.importBookFromUri(context, uri)
+            Toast.makeText(context, "已加入书架，正在后台处理...", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -232,6 +224,7 @@ fun TtsReaderScreen(
                 onSetSleepTimer = { viewModel.setSleepTimer(it) },
                 onSelectSpeaker = { viewModel.setActiveSpeaker(it) },
                 onToggleMultiSpeaker = { viewModel.toggleMultiSpeaker() },
+                onOpenToc = { viewModel.setTocOpen(true) },
                 onOpenSettings = { viewModel.setSettingsOpen(true) },
                 onSeek = { targetIndex -> viewModel.jumpToSentence(targetIndex) }
             )
@@ -366,6 +359,13 @@ fun TtsReaderScreen(
             onDeleteBook = { id ->
                 viewModel.deleteRecentBook(id)
             }
+        )
+    }
+
+    if (uiState.isTocOpen) {
+        ChapterBottomSheet(
+            viewModel = viewModel,
+            onDismiss = { viewModel.setTocOpen(false) }
         )
     }
 
@@ -531,6 +531,7 @@ private fun VibrantEmptyState(
     onSelectRecentBook: (RecentBook) -> Unit,
     onDeleteRecentBook: (String) -> Unit
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -589,7 +590,7 @@ private fun VibrantEmptyState(
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = "TXT · EPUB · 字幕",
+                        text = "TXT · PDF · DOCX · EPUB · 字幕",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -705,10 +706,17 @@ private fun VibrantEmptyState(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(recentBooks, key = { it.id }) { book ->
+                    val isProcessing = book.isProcessing
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelectRecentBook(book) }
+                            .clickable {
+                                if (isProcessing) {
+                                    Toast.makeText(context, "书籍正在后台处理中，请稍候...", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    onSelectRecentBook(book)
+                                }
+                            }
                             .testTag("home_recent_book_${book.id}"),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -747,21 +755,56 @@ private fun VibrantEmptyState(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "读至第 ${book.lastIndex + 1} 句 / 共 ${book.sentenceCount} 句",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                if (book.snippet.isNotBlank()) {
+                                if (isProcessing) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = book.snippet.ifBlank { "正在后台解析..." },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            text = "${(book.progress * 100).toInt()}%",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    LinearProgressIndicator(
+                                        progress = { book.progress },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(4.dp)
+                                            .clip(RoundedCornerShape(2.dp)),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                } else {
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        text = book.snippet,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        text = if (book.sentenceCount > 0) {
+                                            "读至第 ${book.lastIndex + 1} 句 / 共 ${book.sentenceCount} 句"
+                                        } else {
+                                            "点击立即开始阅读"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary
                                     )
+                                    if (book.snippet.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = book.snippet,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
                             }
                             IconButton(
@@ -1093,6 +1136,7 @@ private fun VibrantFooterPlayerBar(
     onSetSleepTimer: (Int) -> Unit,
     onSelectSpeaker: (Int) -> Unit,
     onToggleMultiSpeaker: () -> Unit,
+    onOpenToc: () -> Unit,
     onOpenSettings: () -> Unit,
     onSeek: (Int) -> Unit
 ) {
@@ -1446,36 +1490,27 @@ private fun VibrantFooterPlayerBar(
                     )
                 }
 
-                // Button 4: 发音人选择菜单
-                Box(modifier = Modifier.weight(1f)) {
-                    PlayerQuickButton(
-                        isActive = false,
-                        onClick = { isSpeakerMenuOpen = true },
-                        testTag = "player_speaker_menu_btn"
-                    ) {
-                        Text(
-                            text = "声音${uiState.activeSpeakerIndex + 1}",
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = isSpeakerMenuOpen,
-                        onDismissRequest = { isSpeakerMenuOpen = false }
-                    ) {
-                        (0..2).forEach { index ->
-                            DropdownMenuItem(
-                                text = { Text("声音${index + 1}") },
-                                onClick = {
-                                    onSelectSpeaker(index)
-                                    isSpeakerMenuOpen = false
-                                }
-                            )
-                        }
-                    }
+                // Button 4: 目录按钮
+                PlayerQuickButton(
+                    isActive = uiState.isTocOpen,
+                    onClick = onOpenToc,
+                    testTag = "player_toc_btn",
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Toc,
+                        contentDescription = "目录",
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "目录",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
 
-                // Button 4: 设置按钮
+                // Button 5: 设置按钮
                 PlayerQuickButton(
                     isActive = uiState.isSettingsOpen,
                     onClick = onOpenSettings,
