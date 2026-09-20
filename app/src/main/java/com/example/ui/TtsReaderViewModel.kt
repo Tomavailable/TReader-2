@@ -23,6 +23,10 @@ import com.example.data.TextSegmenter
 import com.example.data.TtsManager
 import com.example.data.TtsPlaybackService
 import com.example.data.TtsVoiceItem
+import com.example.data.TextCleaningRule
+import com.example.data.TextCleaner
+import com.example.data.VocabularyItem
+import com.example.data.VocabularyStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -146,7 +150,15 @@ data class ReaderUiState(
     val isTocOpen: Boolean = false,
     val chapters: List<ChapterItem> = emptyList(),
     val exportState: ExportState = ExportState(),
-    val isLoading: Boolean = false
+    val isLoading: Boolean = false,
+    val breathingPauseMs: Int = 350,
+    val isSmartPauseEnabled: Boolean = true,
+    val isAutoCenterScrollEnabled: Boolean = true,
+    val textCleaningRules: List<TextCleaningRule> = TextCleaner.DEFAULT_RULES,
+    val isTextCleaningEnabled: Boolean = true,
+    val isTextCleaningDialogOpen: Boolean = false,
+    val vocabularyList: List<VocabularyItem> = emptyList(),
+    val isVocabularyBottomSheetOpen: Boolean = false
 ) {
     val splitOnNewline: Boolean get() = terminatorPuncts.contains('\n')
 }
@@ -159,6 +171,7 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
     val recentBooksStore = RecentBooksStore(application)
     val appSettingsStore = AppSettingsStore(application)
     val bookCacheStore = BookCacheStore(application)
+    val vocabularyStore = VocabularyStore(application)
 
     private fun getCurrentConfigHash(
         splitMode: SplitMode = _uiState.value.splitMode,
@@ -195,6 +208,7 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var exportJob: Job? = null
     private var sleepTimerJob: Job? = null
+    private var sentencePauseJob: Job? = null
     private var utteranceCounter = 0
 
     init {
@@ -228,6 +242,11 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val savedFlowLineHeight = appSettingsStore.flowLineHeightMultiplier
         val savedFlowSpacing = appSettingsStore.flowParagraphSpacing
         val savedFlowIndent = appSettingsStore.flowIndentParagraphs
+        val savedPauseMs = appSettingsStore.breathingPauseMs
+        val savedSmartPause = appSettingsStore.isSmartPauseEnabled
+        val savedAutoCenter = appSettingsStore.isAutoCenterScrollEnabled
+        val savedCleaningRules = TextCleaner.deserializeRules(appSettingsStore.textCleaningRulesJson)
+        val savedVocabs = vocabularyStore.getWords()
 
         // 2. Restore recent books (Home screen starts with empty sentences list as requested)
         val recentBooks = recentBooksStore.getRecentBooks()
@@ -273,7 +292,12 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 flowFontSize = savedFlowFontSize,
                 flowLineHeightMultiplier = savedFlowLineHeight,
                 flowParagraphSpacing = savedFlowSpacing,
-                flowIndentParagraphs = savedFlowIndent
+                flowIndentParagraphs = savedFlowIndent,
+                breathingPauseMs = savedPauseMs,
+                isSmartPauseEnabled = savedSmartPause,
+                isAutoCenterScrollEnabled = savedAutoCenter,
+                textCleaningRules = savedCleaningRules,
+                vocabularyList = savedVocabs
             )
         }
 
@@ -797,8 +821,15 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
             oldSentences[oldIdx].take(12)
         } else null
 
+        val raw = _uiState.value.rawText
+        val effectiveText = if (_uiState.value.isTextCleaningEnabled) {
+            TextCleaner.clean(raw, _uiState.value.textCleaningRules)
+        } else {
+            raw
+        }
+
         val segmented = TextSegmenter.segmentDocument(
-            rawText = _uiState.value.rawText,
+            rawText = effectiveText,
             splitMode = _uiState.value.splitMode,
             isSplitEnabled = _uiState.value.isSplitEnabled,
             secondaryPuncts = _uiState.value.secondaryPuncts,
@@ -858,6 +889,8 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun togglePlayPause() {
+        sentencePauseJob?.cancel()
+        sentencePauseJob = null
         val state = _uiState.value
         if (state.sentences.isEmpty()) return
 
@@ -913,6 +946,8 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun jumpToSentence(index: Int) {
+        sentencePauseJob?.cancel()
+        sentencePauseJob = null
         val state = _uiState.value
         if (index !in state.sentences.indices) return
         ttsManager.stop()
@@ -982,49 +1017,76 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val state = _uiState.value
         if (!state.isPlaying) return
 
-        if (state.multiSpeakerEnabled && state.currentSpeakerPass < 2) {
-            // Advance to next speaker for the same sentence
-            _uiState.update { it.copy(currentSpeakerPass = it.currentSpeakerPass + 1) }
-            playCurrentSentence()
-            return
-        }
-
-        // All speakers for this pass have completed
-        val maxRepeats = if (state.targetRepeatCount >= 999) Int.MAX_VALUE else state.targetRepeatCount
-        if (state.currentRepeatPass < maxRepeats) {
-            // Repeat this sentence again
-            _uiState.update {
-                it.copy(
-                    currentRepeatPass = it.currentRepeatPass + 1,
-                    currentSpeakerPass = 0
-                )
+        val currentSentence = if (state.currentIndex in state.sentences.indices) state.sentences[state.currentIndex] else ""
+        val basePause = state.breathingPauseMs
+        val isSmart = state.isSmartPauseEnabled
+        val pauseDuration = if (basePause <= 0) {
+            0L
+        } else if (isSmart) {
+            val lastCh = currentSentence.trimEnd().lastOrNull()
+            when (lastCh) {
+                '，', ',', '、', '；', ';' -> (basePause * 0.6f).toLong().coerceAtLeast(30L)
+                '\n' -> (basePause * 1.5f).toLong()
+                '。', '.', '！', '!', '？', '?' -> basePause.toLong()
+                else -> (basePause * 0.85f).toLong()
             }
-            playCurrentSentence()
-            return
-        }
-
-        // Move to next sentence
-        val nextIndex = state.currentIndex + 1
-        if (nextIndex < state.sentences.size) {
-            viewModelScope.launch(Dispatchers.IO) {
-                recentBooksStore.updateProgress(state.fileName, nextIndex)
-                appSettingsStore.lastOpenedIndex = nextIndex
-            }
-            _uiState.update {
-                it.copy(
-                    currentIndex = nextIndex,
-                    currentRepeatPass = 1,
-                    currentSpeakerPass = 0
-                )
-            }
-            playCurrentSentence()
         } else {
-            // Finished all sentences
-            stopPlayback()
+            basePause.toLong()
+        }
+
+        sentencePauseJob?.cancel()
+        sentencePauseJob = viewModelScope.launch {
+            if (pauseDuration > 0) {
+                delay(pauseDuration)
+            }
+            if (!_uiState.value.isPlaying) return@launch
+
+            if (state.multiSpeakerEnabled && state.currentSpeakerPass < 2) {
+                // Advance to next speaker for the same sentence
+                _uiState.update { it.copy(currentSpeakerPass = it.currentSpeakerPass + 1) }
+                playCurrentSentence()
+                return@launch
+            }
+
+            // All speakers for this pass have completed
+            val maxRepeats = if (state.targetRepeatCount >= 999) Int.MAX_VALUE else state.targetRepeatCount
+            if (state.currentRepeatPass < maxRepeats) {
+                // Repeat this sentence again
+                _uiState.update {
+                    it.copy(
+                        currentRepeatPass = it.currentRepeatPass + 1,
+                        currentSpeakerPass = 0
+                    )
+                }
+                playCurrentSentence()
+                return@launch
+            }
+
+            // Move to next sentence
+            val nextIndex = state.currentIndex + 1
+            if (nextIndex < state.sentences.size) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    recentBooksStore.updateProgress(state.fileName, nextIndex)
+                    appSettingsStore.lastOpenedIndex = nextIndex
+                }
+                _uiState.update {
+                    it.copy(
+                        currentIndex = nextIndex,
+                        currentRepeatPass = 1,
+                        currentSpeakerPass = 0
+                    )
+                }
+                playCurrentSentence()
+            } else {
+                // Finished all sentences
+                stopPlayback()
+            }
         }
     }
 
     fun stopPlayback() {
+        sentencePauseJob?.cancel()
+        sentencePauseJob = null
         ttsManager.stop()
         _uiState.update { it.copy(isPlaying = false) }
         TtsPlaybackService.stop(getApplication())
@@ -1792,6 +1854,101 @@ class TtsReaderViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (e: Exception) {
             Log.d(TAG, "Chooser failed: ${e.message}")
         }
+    }
+
+    // --- 6 Items Optimization Methods ---
+
+    fun setBreathingPauseMs(ms: Int) {
+        val clamped = ms.coerceIn(0, 3000)
+        appSettingsStore.breathingPauseMs = clamped
+        _uiState.update { it.copy(breathingPauseMs = clamped) }
+    }
+
+    fun setSmartPauseEnabled(enabled: Boolean) {
+        appSettingsStore.isSmartPauseEnabled = enabled
+        _uiState.update { it.copy(isSmartPauseEnabled = enabled) }
+    }
+
+    fun setAutoCenterScrollEnabled(enabled: Boolean) {
+        appSettingsStore.isAutoCenterScrollEnabled = enabled
+        _uiState.update { it.copy(isAutoCenterScrollEnabled = enabled) }
+    }
+
+    fun setTextCleaningEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(isTextCleaningEnabled = enabled) }
+        resegmentCurrentSentences()
+    }
+
+    fun updateTextCleaningRules(rules: List<TextCleaningRule>) {
+        appSettingsStore.textCleaningRulesJson = TextCleaner.serializeRules(rules)
+        _uiState.update { it.copy(textCleaningRules = rules) }
+        resegmentCurrentSentences()
+    }
+
+    fun toggleTextCleaningRule(ruleId: String) {
+        val current = _uiState.value.textCleaningRules
+        val updated = current.map {
+            if (it.id == ruleId) it.copy(isEnabled = !it.isEnabled) else it
+        }
+        updateTextCleaningRules(updated)
+    }
+
+    fun addCustomTextCleaningRule(name: String, pattern: String, replacement: String = "", isRegex: Boolean = true) {
+        val newRule = TextCleaningRule(
+            id = "custom_${System.currentTimeMillis()}",
+            name = name.ifBlank { "自定义规则" },
+            pattern = pattern,
+            replacement = replacement,
+            isRegex = isRegex,
+            isEnabled = true
+        )
+        val updated = _uiState.value.textCleaningRules + newRule
+        updateTextCleaningRules(updated)
+    }
+
+    fun deleteTextCleaningRule(ruleId: String) {
+        val updated = _uiState.value.textCleaningRules.filterNot { it.id == ruleId }
+        updateTextCleaningRules(updated)
+    }
+
+    fun resetTextCleaningRules() {
+        updateTextCleaningRules(TextCleaner.DEFAULT_RULES)
+    }
+
+    fun setTextCleaningDialogOpen(open: Boolean) {
+        _uiState.update { it.copy(isTextCleaningDialogOpen = open) }
+    }
+
+    fun toggleVocabularyWord(word: String, contextSentence: String = ""): Boolean {
+        val clean = word.replace(Regex("[^a-zA-Z\\u4e00-\\u9fa5\\-']"), "").trim()
+        if (clean.isEmpty()) return false
+        val isSaved = vocabularyStore.isWordSaved(clean)
+        if (isSaved) {
+            vocabularyStore.removeByWord(clean)
+        } else {
+            vocabularyStore.addWord(clean, contextSentence, _uiState.value.fileName)
+        }
+        _uiState.update { it.copy(vocabularyList = vocabularyStore.getWords()) }
+        return !isSaved
+    }
+
+    fun isWordInVocabulary(word: String): Boolean {
+        val clean = word.replace(Regex("[^a-zA-Z\\u4e00-\\u9fa5\\-']"), "").trim()
+        return vocabularyStore.isWordSaved(clean)
+    }
+
+    fun removeVocabularyItem(id: Long) {
+        vocabularyStore.removeWord(id)
+        _uiState.update { it.copy(vocabularyList = vocabularyStore.getWords()) }
+    }
+
+    fun clearVocabulary() {
+        vocabularyStore.clearAll()
+        _uiState.update { it.copy(vocabularyList = emptyList()) }
+    }
+
+    fun setVocabularyBottomSheetOpen(open: Boolean) {
+        _uiState.update { it.copy(isVocabularyBottomSheetOpen = open) }
     }
 
     override fun onCleared() {

@@ -9,10 +9,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -23,6 +27,7 @@ class TtsPlaybackService : Service() {
     private val TAG = "TtsPlaybackService"
     private var wakeLock: PowerManager.WakeLock? = null
     private var isForegroundStarted = false
+    private var mediaSession: MediaSession? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -30,11 +35,122 @@ class TtsPlaybackService : Service() {
         super.onCreate()
         isServiceRunning = true
         createNotificationChannel()
+        initMediaSession()
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TtsReader:PlaybackWakeLock")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to init wake lock: ${e.message}")
+        }
+    }
+
+    private fun initMediaSession() {
+        try {
+            mediaSession = MediaSession(this, "TtsPlaybackMediaSession").apply {
+                setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+                setCallback(object : MediaSession.Callback() {
+                    override fun onPlay() {
+                        TtsPlaybackService.controller?.onActionTogglePlayPause()
+                    }
+
+                    override fun onPause() {
+                        TtsPlaybackService.controller?.onActionTogglePlayPause()
+                    }
+
+                    override fun onSkipToNext() {
+                        TtsPlaybackService.controller?.onActionNext()
+                    }
+
+                    override fun onSkipToPrevious() {
+                        TtsPlaybackService.controller?.onActionPrev()
+                    }
+
+                    override fun onStop() {
+                        TtsPlaybackService.controller?.onActionStop()
+                        stopForegroundService()
+                    }
+
+                    override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                        val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                        }
+                        if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
+                            when (keyEvent.keyCode) {
+                                KeyEvent.KEYCODE_HEADSETHOOK,
+                                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                                    TtsPlaybackService.controller?.onActionTogglePlayPause()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                    TtsPlaybackService.controller?.onActionTogglePlayPause()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                    TtsPlaybackService.controller?.onActionTogglePlayPause()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_NEXT,
+                                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                                    TtsPlaybackService.controller?.onActionNext()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                                    TtsPlaybackService.controller?.onActionPrev()
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_STOP -> {
+                                    TtsPlaybackService.controller?.onActionStop()
+                                    stopForegroundService()
+                                    return true
+                                }
+                            }
+                        }
+                        return super.onMediaButtonEvent(mediaButtonIntent)
+                    }
+                })
+                isActive = true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaSession init warning: ${e.message}")
+        }
+    }
+
+    private fun updateMediaSessionState(
+        title: String,
+        sentence: String,
+        progress: String,
+        isPlaying: Boolean
+    ) {
+        try {
+            val session = mediaSession ?: return
+            val state = if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED
+            val playbackActions = PlaybackState.ACTION_PLAY or
+                    PlaybackState.ACTION_PAUSE or
+                    PlaybackState.ACTION_PLAY_PAUSE or
+                    PlaybackState.ACTION_SKIP_TO_NEXT or
+                    PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                    PlaybackState.ACTION_STOP
+
+            val stateBuilder = PlaybackState.Builder()
+                .setActions(playbackActions)
+                .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            session.setPlaybackState(stateBuilder.build())
+
+            val metadata = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, sentence)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, "TTS 朗读 $progress".trim())
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, sentence)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION, progress)
+                .build()
+            session.setMetadata(metadata)
+        } catch (e: Exception) {
+            Log.w(TAG, "Update MediaSession state warning: ${e.message}")
         }
     }
 
@@ -49,6 +165,7 @@ class TtsPlaybackService : Service() {
                 val isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, true)
 
                 updateForegroundNotification(title, sentence, progress, isPlaying)
+                updateMediaSessionState(title, sentence, progress, isPlaying)
 
                 if (isPlaying) {
                     acquireWakeLock()
@@ -149,23 +266,56 @@ class TtsPlaybackService : Service() {
             val playPauseTitle = if (isPlaying) "暂停" else "播放"
 
             val contentSnippet = if (sentence.length > 50) sentence.take(50) + "…" else sentence
-            val statusPrefix = if (isPlaying) "▶ 正在朗读" else "⏸ 已暂停"
-            val subtitle = if (progress.isNotBlank()) "$statusPrefix ($progress)" else statusPrefix
 
-            val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            val prevAction = Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_media_previous),
+                "上一句",
+                prevPendingIntent
+            ).build()
+
+            val playPauseAction = Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(this, playPauseIcon),
+                playPauseTitle,
+                playPausePendingIntent
+            ).build()
+
+            val nextAction = Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_media_next),
+                "下一句",
+                nextPendingIntent
+            ).build()
+
+            val stopAction = Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                "关闭",
+                stopPendingIntent
+            ).build()
+
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+
+            val mediaStyle = Notification.MediaStyle()
+                .setMediaSession(mediaSession?.sessionToken)
+                .setShowActionsInCompactView(0, 1, 2)
+
+            val notification: Notification = builder
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("$title · $subtitle")
+                .setContentTitle(title)
                 .setContentText(contentSnippet)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(sentence))
+                .setSubText(if (progress.isNotBlank()) progress else null)
                 .setContentIntent(openAppIntent)
                 .setOngoing(isPlaying)
                 .setOnlyAlertOnce(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .addAction(android.R.drawable.ic_media_previous, "上一句", prevPendingIntent)
-                .addAction(playPauseIcon, playPauseTitle, playPausePendingIntent)
-                .addAction(android.R.drawable.ic_media_next, "下一句", nextPendingIntent)
-                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "关闭", stopPendingIntent)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setStyle(mediaStyle)
+                .addAction(prevAction)
+                .addAction(playPauseAction)
+                .addAction(nextAction)
+                .addAction(stopAction)
                 .build()
 
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -209,6 +359,13 @@ class TtsPlaybackService : Service() {
         isServiceRunning = false
         isForegroundStarted = false
         releaseWakeLock()
+        try {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+            mediaSession = null
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaSession release error: ${e.message}")
+        }
         super.onDestroy()
     }
 

@@ -47,6 +47,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Toc
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.FilterCenterFocus
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Book
@@ -173,7 +178,8 @@ fun TtsReaderScreen(
     val coroutineScope = rememberCoroutineScope()
 
     // Scroll active playing sentence to center
-    LaunchedEffect(uiState.currentIndex, uiState.isAnimationEnabled, uiState.splitMode) {
+    LaunchedEffect(uiState.currentIndex, uiState.isAnimationEnabled, uiState.splitMode, uiState.isAutoCenterScrollEnabled) {
+        if (!uiState.isAutoCenterScrollEnabled) return@LaunchedEffect
         if (uiState.currentIndex in uiState.sentences.indices) {
             val targetScrollIndex = if (uiState.splitMode == SplitMode.PARAGRAPH_FLOW) {
                 val pIdx = uiState.flowParagraphs.indexOfFirst { p -> p.spans.any { it.globalSentenceIndex == uiState.currentIndex } }
@@ -199,6 +205,8 @@ fun TtsReaderScreen(
                 currentIndex = uiState.currentIndex,
                 totalSentences = uiState.sentences.size,
                 hasRecentBooks = uiState.recentBooks.isNotEmpty(),
+                vocabularyCount = uiState.vocabularyList.size,
+                onOpenVocabulary = { viewModel.setVocabularyBottomSheetOpen(true) },
                 onHomeClick = { viewModel.returnToHome() },
                 onRecentBooksClick = { viewModel.setRecentBooksDialogOpen(true) },
                 onUploadClick = { filePickerLauncher.launch("*/*") },
@@ -387,6 +395,28 @@ fun TtsReaderScreen(
         )
     }
 
+    if (uiState.isTextCleaningDialogOpen) {
+        TextCleaningDialog(
+            rules = uiState.textCleaningRules,
+            isCleaningEnabled = uiState.isTextCleaningEnabled,
+            onToggleCleaningEnabled = { viewModel.setTextCleaningEnabled(it) },
+            onToggleRule = { viewModel.toggleTextCleaningRule(it) },
+            onAddRule = { name, pattern, replacement ->
+                viewModel.addCustomTextCleaningRule(name, pattern, replacement)
+            },
+            onDeleteRule = { viewModel.deleteTextCleaningRule(it) },
+            onResetDefaults = { viewModel.resetTextCleaningRules() },
+            onDismiss = { viewModel.setTextCleaningDialogOpen(false) }
+        )
+    }
+
+    if (uiState.isVocabularyBottomSheetOpen) {
+        VocabularyBottomSheet(
+            viewModel = viewModel,
+            onDismiss = { viewModel.setVocabularyBottomSheetOpen(false) }
+        )
+    }
+
 
     if (uiState.wordLookupMode == WordLookupMode.POPOVER_MENU && !uiState.activePopoverWord.isNullOrEmpty()) {
         val popoverWord = uiState.activePopoverWord!!
@@ -409,6 +439,8 @@ private fun VibrantHeaderBar(
     currentIndex: Int,
     totalSentences: Int,
     hasRecentBooks: Boolean,
+    vocabularyCount: Int,
+    onOpenVocabulary: () -> Unit,
     onHomeClick: () -> Unit,
     onRecentBooksClick: () -> Unit,
     onUploadClick: () -> Unit,
@@ -464,6 +496,37 @@ private fun VibrantHeaderBar(
             }
         },
         actions = {
+            // 生词本入口
+            IconButton(
+                onClick = onOpenVocabulary,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (vocabularyCount > 0) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .testTag("header_vocabulary_btn")
+            ) {
+                BadgedBox(
+                    badge = {
+                        if (vocabularyCount > 0) {
+                            Badge {
+                                Text(if (vocabularyCount > 99) "99+" else vocabularyCount.toString(), fontSize = 9.sp)
+                            }
+                        }
+                    }
+                ) {
+                    Icon(
+                        Icons.Default.Bookmark,
+                        contentDescription = "生词本",
+                        tint = if (vocabularyCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
             IconButton(
                 onClick = onUploadClick,
                 modifier = Modifier
@@ -1768,6 +1831,10 @@ private fun MoonReaderPopoverMenu(
                 .padding(horizontal = 12.dp)
                 .testTag("floating_popover_bar")
         ) {
+            val currentSentence = if (uiState.currentIndex in uiState.sentences.indices) {
+                uiState.sentences[uiState.currentIndex]
+            } else ""
+
             Row(
                 modifier = Modifier
                     .horizontalScroll(rememberScrollState())
@@ -1810,6 +1877,19 @@ private fun MoonReaderPopoverMenu(
                 )
 
 
+                // 4. 生词本 (一键收藏/移除)
+                val isSavedInVocab = viewModel.isWordInVocabulary(word)
+                MoonReaderMenuAction(
+                    icon = if (isSavedInVocab) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                    label = if (isSavedInVocab) "已入生词本" else "生词本",
+                    highlight = isSavedInVocab,
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val added = viewModel.toggleVocabularyWord(word, currentSentence ?: "")
+                        Toast.makeText(context, if (added) "已加入生词本: $word" else "已从生词本移除: $word", Toast.LENGTH_SHORT).show()
+                    }
+                )
+
                 // 5. Pronounce / TTS Speak
                 MoonReaderMenuAction(
                     icon = Icons.Default.VolumeUp,
@@ -1841,10 +1921,7 @@ private fun MoonReaderPopoverMenu(
                 )
 
                 // 8. Sentence Inspection / Words analysis
-                val currentSentence = if (uiState.currentIndex in uiState.sentences.indices) {
-                    uiState.sentences[uiState.currentIndex]
-                } else null
-                if (currentSentence != null) {
+                if (currentSentence.isNotBlank()) {
                     MoonReaderMenuAction(
                         icon = Icons.Default.EditNote,
                         label = "整句分词",

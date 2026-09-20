@@ -839,6 +839,94 @@ fun SettingsBottomSheet(
                         modifier = Modifier.testTag("animation_toggle_switch")
                     )
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // 自动垂直居中滚动
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("自动垂直居中滚动", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text("朗读时始终将正在阅读的句子自动平滑居中在屏幕垂直中央", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = uiState.isAutoCenterScrollEnabled,
+                        onCheckedChange = { viewModel.setAutoCenterScrollEnabled(it) },
+                        modifier = Modifier.testTag("auto_center_scroll_switch")
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // 断句智能微停顿 (Natural Breathing Pause)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "断句微停顿 (Natural Breathing Pause)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (uiState.breathingPauseMs == 0) "已关闭 (0ms)" else "${uiState.breathingPauseMs} ms",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = "句子朗读完毕与下一句之间的呼吸微停顿间隙",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Slider(
+                        value = uiState.breathingPauseMs.toFloat(),
+                        onValueChange = { viewModel.setBreathingPauseMs(it.toInt()) },
+                        valueRange = 0f..2000f,
+                        steps = 19,
+                        modifier = Modifier.fillMaxWidth().testTag("breathing_pause_slider")
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(0 to "关闭", 150 to "紧凑", 350 to "自然", 600 to "舒缓", 1000 to "深长").forEach { (ms, label) ->
+                            FilterChip(
+                                selected = uiState.breathingPauseMs == ms,
+                                onClick = { viewModel.setBreathingPauseMs(ms) },
+                                label = { Text(label, fontSize = 11.sp) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("语气智能自适应停顿", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Text("逗号分号轻短顿，句号问号标准顿，段落换行从容长顿", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = uiState.isSmartPauseEnabled,
+                            onCheckedChange = { viewModel.setSmartPauseEnabled(it) }
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -951,6 +1039,53 @@ fun SettingsBottomSheet(
                                 contentDescription = "编辑二次拆分规则",
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 文本清洗预处理规则
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "文本清洗预处理规则",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (uiState.isTextCleaningEnabled)
+                                    "已开启：自动过滤广告、水印、网址及多余空行"
+                                else
+                                    "未开启：保持原文不清洗",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = { viewModel.setTextCleaningDialogOpen(true) },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .testTag("text_cleaning_rules_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = "管理文本清洗规则",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Switch(
+                                checked = uiState.isTextCleaningEnabled,
+                                onCheckedChange = { viewModel.setTextCleaningEnabled(it) }
                             )
                         }
                     }

@@ -220,4 +220,20 @@ class AppSettingsStore(context: Context) {
     var lastOpenedIndex: Int
         get() = prefs.getInt("last_index", 0)
         set(value) = prefs.edit().putInt("last_index", value).apply()
+
+    var breathingPauseMs: Int
+        get() = prefs.getInt("breathing_pause_ms", 350)
+        set(value) = prefs.edit().putInt("breathing_pause_ms", value).apply()
+
+    var isSmartPauseEnabled: Boolean
+        get() = prefs.getBoolean("is_smart_pause_enabled", true)
+        set(value) = prefs.edit().putBoolean("is_smart_pause_enabled", value).apply()
+
+    var isAutoCenterScrollEnabled: Boolean
+        get() = prefs.getBoolean("is_auto_center_scroll", true)
+        set(value) = prefs.edit().putBoolean("is_auto_center_scroll", value).apply()
+
+    var textCleaningRulesJson: String?
+        get() = prefs.getString("text_cleaning_rules_json", null)
+        set(value) = prefs.edit().putString("text_cleaning_rules_json", value).apply()
 }
